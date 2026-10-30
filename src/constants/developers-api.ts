@@ -102,7 +102,7 @@ export const apiSections: ApiSection[] = [
         path: "/feed",
         access: "auth",
         description:
-          "Feed pessoal por aba: FOR_YOU (comunidades que você participa + posts fora de comunidade), FOLLOWING, ALL, DISCUSSIONS, RECENT, PROJECTS. Pagina por cursor. Com tab=ALL, type filtra o tipo (ex.: QUESTION) e resolved=true|false separa dúvidas resolvidas das abertas.",
+          "Feed pessoal por aba: FOR_YOU (comunidades que você participa + posts fora de comunidade), FOLLOWING, ALL, DISCUSSIONS, RECENT, PROJECTS. Em FOR_YOU, os interesses ordenam os itens dentro da página selecionada por data. Reenvie nextCursor sem alterá-lo; uma página vazia pode ter continuação. Termine quando nextCursor for null. Com tab=ALL, type filtra o tipo (ex.: QUESTION) e resolved=true|false separa dúvidas resolvidas das abertas.",
         request: `curl "${P}/feed?tab=FOR_YOU&limit=20" \\
   -H "X-Session-Token: $TOKEN"`,
         response: `200 OK
@@ -367,14 +367,14 @@ export const apiSections: ApiSection[] = [
         path: "/jobs",
         access: "auth",
         description:
-          "Publica vaga (reputação >= 150). PATCH edita, /close encerra, DELETE exclui. Candidaturas: POST /jobs/{id}/applications; status em PATCH /jobs/{id}/applications/{applicationId}; minhas candidaturas em GET /jobs/applications.",
+          "Publica vaga (reputação maior que 150). Exige Idempotency-Key: mesma chave e mesmos dados devolvem o resultado original; dados diferentes retornam 409 IDEMPOTENCY_PAYLOAD_CONFLICT. PUT edita, /close encerra, DELETE exclui. Uma edição concorrente não reabre uma vaga encerrada. Salários aceitam 1500, 1.500,50 e R$ 1.500,50, até duas casas decimais e o limite 9999999999,99. Sinal, texto misturado, máximo não vazio inválido e frações de centavo retornam 400 INVALID_SALARY_AMOUNT. Candidaturas: POST /jobs/{id}/applications; status em PATCH /jobs/{id}/applications/{applicationId}; minhas candidaturas em GET /jobs/applications.",
       },
       {
         method: "GET",
         path: "/jobs/applications",
         access: "auth",
         description:
-          "Candidaturas do próprio usuário (e as recebidas em GET /jobs/{jobId}/applications, para quem publicou).",
+          "Vagas em que o usuário se candidatou, da candidatura mais recente para a mais antiga, com desempate pelo id da candidatura. Aceita limit e cursor; devolve {items, nextCursor}. Envie nextCursor integralmente, sem converter para data. Neste endpoint, o cursor contém a data e o id da candidatura; timestamp isolado é aceito como data de candidatura. Cursores anteriores à atualização podem exigir reiniciar a navegação. Vagas encerradas continuam no histórico. As candidaturas recebidas estão em GET /jobs/{jobId}/applications, para quem publicou.",
       },
     ],
   },
@@ -404,7 +404,7 @@ export const apiSections: ApiSection[] = [
         path: "/events",
         access: "auth",
         description:
-          "Cria evento. city e state opcionais, só para presencial ou híbrido. recurrence: NONE (padrão) | WEEKLY | BIWEEKLY | MONTHLY; evento recorrente precisa de horário HH:MM (400 INVALID_RECURRENCE / INVALID_EVENT_TIME).",
+          "Cria evento. city e state opcionais, só para presencial ou híbrido. recurrence: NONE (padrão) | WEEKLY | BIWEEKLY | MONTHLY; evento recorrente precisa de horário HH:MM (400 INVALID_RECURRENCE / INVALID_EVENT_TIME). A recorrência mensal preserva a data de referência da série após remover ocorrências antigas (31 jan → 29 fev → 31 mar). Séries antigas cujo início já foi removido usam a primeira data ainda conhecida.",
       },
       {
         method: "PATCH",
@@ -448,7 +448,28 @@ export const apiSections: ApiSection[] = [
         path: "/mentors",
         access: "auth",
         description:
-          "Torna-se mentor; POST /mentors/{id}/slots publica horários; /sessions pede/agenda sessão.",
+          "Torna-se mentor. Quem publicou o perfil pode disponibilizar horários em POST /mentors/{mentorId}/slots.",
+      },
+      {
+        method: "POST",
+        path: "/mentors/{mentorId}/slots",
+        access: "auth",
+        description:
+          "Publica um horário do próprio mentor. O corpo contém startsAt e endsAt; o fim deve ser posterior ao início. Intervalo ausente ou inválido retorna 400 INVALID_SLOT_INTERVAL.",
+      },
+      {
+        method: "DELETE",
+        path: "/mentors/{mentorId}/slots/{slotId}",
+        access: "auth",
+        description:
+          "Remove um horário livre do próprio mentor. Se uma reserva vencer a concorrência com a remoção, retorna 409 SLOT_BOOKED e preserva o horário. Atualizar a disponibilidade semanal também preserva horários já reservados.",
+      },
+      {
+        method: "POST",
+        path: "/mentors/{mentorId}/sessions",
+        access: "auth",
+        description:
+          "Reserva uma sessão com slotId e message opcional. O horário precisa pertencer ao mentor, estar disponível e ainda não ter encerrado. Horário encerrado retorna 409 SLOT_EXPIRED; intervalo legado inválido retorna 409 INVALID_SLOT_INTERVAL; indisponível ou reservado por outra pessoa retorna 409 SLOT_UNAVAILABLE. Duas reservas concorrentes do mesmo horário criam somente uma sessão.",
       },
     ],
   },
@@ -523,13 +544,15 @@ export const apiSections: ApiSection[] = [
         method: "GET",
         path: "/conversations/{id}/messages",
         access: "auth",
-        description: "Mensagens da conversa.",
+        description:
+          "Mensagens da conversa em ordem decrescente de data e id. Envie nextCursor integralmente, sem converter para data. Timestamp isolado continua aceito, mas não recupera empates já ultrapassados; reinicie a navegação para usar o novo cursor.",
       },
       {
         method: "POST",
         path: "/conversations/{id}/messages",
         access: "auth",
-        description: "Envia mensagem (reações em …/messages/{messageId}/reactions).",
+        description:
+          "Envia mensagem; replyToId opcional cita uma mensagem da mesma conversa. Respostas com o mesmo texto e alvos diferentes são mensagens distintas. Reutilizar Idempotency-Key com outro alvo, inclusive removendo a citação, retorna 409 IDEMPOTENCY_PAYLOAD_CONFLICT. Reações em …/messages/{messageId}/reactions.",
       },
       {
         method: "POST",
@@ -555,7 +578,8 @@ export const apiSections: ApiSection[] = [
         method: "GET",
         path: "/notifications",
         access: "auth",
-        description: "Notificações do usuário (cursor).",
+        description:
+          "Notificações do usuário em ordem decrescente de data e id, com cursor e limit; devolve {items, nextCursor}. Envie nextCursor integralmente. Timestamp isolado continua aceito, mas não recupera empates já ultrapassados. Notificações de pessoas bloqueadas ficam fora de items. Uma página vazia pode ter nextCursor: continue com esse valor até receber nextCursor: null.",
       },
       {
         method: "GET",
